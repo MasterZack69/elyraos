@@ -316,6 +316,7 @@ export default function Terminal({ windowId }) {
           onChange={e => { setInput(e.target.value); setHistIdx(-1) }}
           onKeyDown={handleKeyDown}
           spellCheck={false}
+          autoCapitalize={"none"}
         />
       </div>
     </div>
