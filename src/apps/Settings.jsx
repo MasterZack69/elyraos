@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react"
 import { createPortal } from "react-dom"
-import { Monitor, Sliders, Info, Check, Palette, Layers, AppWindow, LogOut, ShieldCheck, HardDrive, Globe, Clock, Lock, Unlock, X, User, Shield } from "lucide-react"
+import { Monitor, Sliders, Info, Check, Palette, Layers, AppWindow, LogOut, ShieldCheck, HardDrive, Globe, Clock, Lock, Unlock, X, User, Shield, Github } from "lucide-react"
 import { useStore } from "../store/useStore"
 import { useAuthStore } from "../store/useAuthStore"
 import { WALLPAPERS, WALLPAPER_LABELS, ACCENTS } from "../config.js"
@@ -722,7 +722,11 @@ export default function Settings({ context }) {
               <div className="text-white/50 text-sm mb-4">Version {BRANDING.version} · Web-based OS</div>
               <div className="text-xs text-white/30">Built with React · Vite · Framer Motion · Zustand</div>
               <div className="text-xs text-white/30">Built with ❤️ by X-FRST</div>
-              <div className="text-xs text-white/30">Support: <a href={`mailto:${BRANDING.supportUrl}`} className="underline">{BRANDING.supportUrl}</a></div>
+              <div className="mt-3 text-xs text-white/30">Support: <a href={`mailto:${BRANDING.supportUrl}`} className="underline">{BRANDING.supportUrl}</a></div>
+              <div className="flex items-center justify-center gap-1.5 text-xs text-white/30">
+                <Github size={12} />
+                <a href="https://github.com/x-frst/elyraos" target="_blank" rel="noopener noreferrer" className="underline hover:text-white/60 transition-colors">github.com/x-frst/elyraos</a>
+              </div>
             </div>
           </div>
         )}
