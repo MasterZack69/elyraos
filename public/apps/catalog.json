@@ -1906,6 +1906,23 @@
         "https://i.imgur.com/Jw59GYm.jpeg",
         "https://i.imgur.com/TbPz2ea.jpeg"
       ]
+    },
+    {
+      "name": "InOrbit",
+      "description": "Test your timing and precision in a minimalist **arcade game** set in a floating space environment.\n\nJump between rotating platforms and stay in orbit without drifting away into space.\n\n## ✨ Key Features\n- One-tap or click gameplay mechanics  \n- Jump between rotating platforms  \n- Increasing difficulty with timing challenges  \n- Minimalist and visually clean design  \n- Addictive and fast-paced experience  \n\n## 🚀 Why You'll Love It\n*Perfect for quick reflex-based gameplay sessions.*  \n\nTime your jumps perfectly and stay in orbit as long as possible.",
+      "url": "https://cdn.primarygames.com/HTML5/InOrbit/",
+      "allowIframe": true,
+      "showCursor": true,
+      "featured": false,
+      "tags": [
+        "game"
+      ],
+      "icon_url": "https://i.imgur.com/fFVffwv.jpeg",
+      "cover_image": "https://i.imgur.com/bttlunE.jpeg",
+      "media": [
+        "https://i.imgur.com/dhc4ytJ.jpeg",
+        "https://i.imgur.com/FugFsU3.jpeg"
+      ]
     }
   ]
 }
