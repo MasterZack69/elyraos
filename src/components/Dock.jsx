@@ -1,4 +1,4 @@
-﻿import { useRef, useState, useEffect } from "react"
+﻿import { useRef, useState, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
 import { motion, useMotionValue, useTransform, useSpring } from "framer-motion"
 import { useStore, SYSTEM_APPS } from "../store/useStore"
@@ -47,7 +47,8 @@ function DockIcon({ app, mouseX, magnify = true, isRunning, onClick, onContextMe
 
   return (
     <div className="relative flex flex-col items-center flex-shrink-0" style={{ gap: 3 }}
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      onTouchEnd={() => setTimeout(() => setHover(false), 1500)}>
       <Tooltip label={app.title} anchorRef={ref} visible={hover} />
       <motion.button ref={ref} style={{ scale, y }} whileTap={{ scale: 0.86 }}
         onClick={onClick} onContextMenu={onContextMenu}
@@ -75,6 +76,7 @@ export default function Dock() {
   const launcherOpen   = useStore(s => s.launcherOpen)
   const dockItems     = useStore(s => s.dockItems)
   const unpinFromDock  = useStore(s => s.unpinFromDock)
+  const reorderDockItem = useStore(s => s.reorderDockItem)
   const addToDesktop   = useStore(s => s.addToDesktop)
   const desktopItems   = useStore(s => s.desktopItems)
   const showContextMenu = useStore(s => s.showContextMenu)
@@ -195,9 +197,137 @@ export default function Dock() {
   }
 
   const pinnedApps = dockItems.map(resolveApp).filter(Boolean)
-  const trashApp = SYSTEM_APPS.trash
 
-  // Running apps that are NOT pinned to dock — one entry per window (not deduped)
+  // ── Dock drag state ───────────────────────────────────────────────────────
+  const [dragDockId,  setDragDockId]  = useState(null)
+  const [dropDockId,  setDropDockId]  = useState(null)
+  const touchDropRef  = useRef(null)
+  const longPressRef  = useRef(null)
+  // Always-fresh ref to handleRightClick so the touch handler never stales
+  const rightClickRef = useRef(null)
+  rightClickRef.current = handleRightClick
+
+  // ── Touch drag for dock reorder ───────────────────────────────────────────
+  // Two-phase model:
+  //   Phase 1 (0–500 ms)  — finger still: wait for long-press timer.
+  //                          Finger moves > 8 px: abort (user is scrolling).
+  //   Phase 2 (500 ms+)   — long-press fired: vibrate, enter drag-ready.
+  //                          First move > 6 px: create ghost and drag.
+  //                          Touchend without move: show context menu manually.
+  // contextmenu is suppressed immediately on touchstart so the browser can't
+  // fire touchend as a side-effect of its native long-press handling (iOS).
+  const handleDockTouchStart = useCallback((e, app) => {
+    if (!isTouchDevice) return
+    if (e.touches.length !== 1) return
+    const nonMovable = ['launcher', 'trash']
+    if (nonMovable.includes(app.id)) return
+
+    const iconEl = e.currentTarget
+    const touch  = e.touches[0]
+    const startX = touch.clientX
+    const startY = touch.clientY
+    let lastX = startX, lastY = startY
+    let longPressed = false
+    let dragStarted = false
+    let ghost = null
+
+    // Suppress browser contextmenu immediately — prevents iOS firing touchend
+    // as a side-effect. We show our own menu from the touchend handler.
+    const suppressCtx = (ev) => ev.preventDefault()
+    document.addEventListener('contextmenu', suppressCtx, { capture: true })
+
+    // Forward-declare so cleanup() can reference them by binding
+    let beforeMove, afterMove, onEnd
+
+    const cleanup = () => {
+      clearTimeout(longPressRef.current)
+      document.removeEventListener('touchmove', beforeMove)
+      document.removeEventListener('touchmove', afterMove)
+      document.removeEventListener('contextmenu', suppressCtx, true)
+      document.removeEventListener('touchend',    onEnd)
+      document.removeEventListener('touchcancel', onEnd)
+    }
+
+    // Phase 1: cancel if finger wanders before long-press fires (scroll intent)
+    beforeMove = (ev) => {
+      const t = ev.touches[0]
+      lastX = t.clientX; lastY = t.clientY
+      if (Math.abs(t.clientX - startX) > 8 || Math.abs(t.clientY - startY) > 8) cleanup()
+    }
+    document.addEventListener('touchmove', beforeMove, { passive: true })
+
+    // Phase 2: first movement after long-press creates ghost and tracks drag
+    afterMove = (ev) => {
+      ev.preventDefault()
+      const t = ev.touches[0]
+      lastX = t.clientX; lastY = t.clientY
+
+      if (!dragStarted && (Math.abs(t.clientX - startX) > 6 || Math.abs(t.clientY - startY) > 6)) {
+        dragStarted = true
+        useStore.getState().hideContextMenu()
+        const rect = iconEl.getBoundingClientRect()
+        ghost = iconEl.cloneNode(true)
+        Object.assign(ghost.style, {
+          position: 'fixed',
+          left: rect.left + 'px', top: rect.top + 'px',
+          width: rect.width + 'px', height: rect.height + 'px',
+          pointerEvents: 'none', zIndex: '99999',
+          opacity: '0.85', transform: 'scale(1.2)',
+          transition: 'transform 0.12s ease',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+        })
+        document.body.appendChild(ghost)
+        touchDropRef.current = null
+        setDragDockId(app.id)
+      }
+
+      if (dragStarted && ghost) {
+        const rect = iconEl.getBoundingClientRect()
+        ghost.style.left = (rect.left + (t.clientX - startX)) + 'px'
+        ghost.style.top  = (rect.top  + (t.clientY - startY)) + 'px'
+        ghost.style.visibility = 'hidden'
+        const under = document.elementFromPoint(t.clientX, t.clientY)
+        ghost.style.visibility = 'visible'
+        const targetEl = under?.closest('[data-dock-pinned-id]')
+        const targetId = targetEl?.dataset.dockPinnedId ?? null
+        touchDropRef.current = (targetId && targetId !== app.id && !['launcher','trash'].includes(targetId))
+          ? targetId : null
+        setDropDockId(touchDropRef.current)
+      }
+    }
+
+    onEnd = () => {
+      cleanup()
+      if (ghost && document.body.contains(ghost)) document.body.removeChild(ghost)
+      ghost = null
+
+      if (dragStarted) {
+        const dropId = touchDropRef.current
+        touchDropRef.current = null
+        if (dropId) reorderDockItem(app.id, dropId)
+        setDragDockId(null); setDropDockId(null)
+      } else if (longPressed) {
+        // Long-press without drag → show context menu at last touch position
+        setDragDockId(null); setDropDockId(null)
+        rightClickRef.current(
+          { preventDefault: () => {}, stopPropagation: () => {}, clientX: lastX, clientY: lastY },
+          app
+        )
+      }
+    }
+
+    longPressRef.current = setTimeout(() => {
+      longPressed = true
+      if (navigator.vibrate) navigator.vibrate(40)
+      document.removeEventListener('touchmove', beforeMove)
+      document.addEventListener('touchmove', afterMove, { passive: false })
+    }, 500)
+
+    document.addEventListener('touchend',    onEnd, { once: true })
+    document.addEventListener('touchcancel', onEnd, { once: true })
+  }, [isTouchDevice, reorderDockItem])
+
+  const trashApp = SYSTEM_APPS.trash
   const pinnedSet = new Set(dockItems)
   // Build a set of running appTypes so pinned icons show the "running" dot even when
   // instances were opened with dynamic appIds (e.g. "docviewer-abc123" for appType "doc-viewer")
@@ -230,14 +360,48 @@ export default function Dock() {
         onMouseLeave={() => mouseX.set(Infinity)}
         onContextMenu={handleDockRightClick}
       >
-        {pinnedApps.map((app) => (
-          <div key={app.id} data-dockicon className="flex-shrink-0">
-            <DockIcon app={app} mouseX={mouseX}
-              magnify={!isTouchDevice && settings?.dockMagnification !== false}
-              isRunning={runningIds.has(app.id) || runningTypes.has(app.type)} size={iconSize}
-              onClick={() => handleClick(app)} onContextMenu={(e) => handleRightClick(e, app)} />
-          </div>
-        ))}
+        {pinnedApps.map((app) => {
+          const isDragging = dragDockId === app.id
+          const isDropTarget = dropDockId === app.id && dragDockId !== app.id
+          const nonMovable = ['launcher', 'trash']
+          const canDrag = !nonMovable.includes(app.id)
+          return (
+            <div
+              key={app.id}
+              data-dockicon
+              data-dock-pinned-id={app.id}
+              className="flex-shrink-0"
+              style={{
+                opacity: isDragging ? 0.35 : 1,
+                transition: 'opacity 0.15s',
+                outline: isDropTarget ? '2px solid rgba(var(--nova-accent-rgb,130,80,255),0.7)' : 'none',
+                outlineOffset: 4,
+                borderRadius: 18,
+              }}
+              draggable={!isTouchDevice && canDrag}
+              onDragStart={!isTouchDevice && canDrag ? (e) => {
+                setDragDockId(app.id)
+                e.dataTransfer.effectAllowed = 'move'
+                e.dataTransfer.setData('text/plain', app.id)
+              } : undefined}
+              onDragEnd={!isTouchDevice ? () => { setDragDockId(null); setDropDockId(null) } : undefined}
+              onDragOver={!isTouchDevice && canDrag ? (e) => { e.preventDefault(); setDropDockId(app.id) } : undefined}
+              onDragLeave={!isTouchDevice ? () => setDropDockId(null) : undefined}
+              onDrop={!isTouchDevice ? (e) => {
+                e.preventDefault()
+                const fromId = e.dataTransfer.getData('text/plain')
+                if (fromId && fromId !== app.id) reorderDockItem(fromId, app.id)
+                setDragDockId(null); setDropDockId(null)
+              } : undefined}
+              onTouchStart={isTouchDevice && canDrag ? (e) => handleDockTouchStart(e, app) : undefined}
+            >
+              <DockIcon app={app} mouseX={mouseX}
+                magnify={!isTouchDevice && settings?.dockMagnification !== false}
+                isRunning={runningIds.has(app.id) || runningTypes.has(app.type)} size={iconSize}
+                onClick={() => handleClick(app)} onContextMenu={(e) => handleRightClick(e, app)} />
+            </div>
+          )
+        })}
 
         {/* Running unpinned apps */}
         {unpinnedRunning.length > 0 && (

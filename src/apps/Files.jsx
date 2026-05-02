@@ -17,10 +17,10 @@ import { fsRawUrl, fsUploadStream } from "../utils/db"
 const EXT_ICONS = {
   jpg: Image, jpeg: Image, png: Image, gif: Image, webp: Image, svg: Image,
   mp3: Music, wav: Music, ogg: Music,
-  mp4: Video, mkv: Video, webm: Video,
+  mp4: Video, mkv: Video, webm: Video, mov: Video, avi: Video, m4v: Video,
   js: FileCode, ts: FileCode, jsx: FileCode, tsx: FileCode,
   css: FileCode, html: FileCode, py: FileCode, sh: FileCode,
-  zip: Archive, tar: Archive, gz: Archive,
+  zip: Archive, tar: Archive, gz: Archive, rar: Archive, '7z': Archive, tgz: Archive,
 }
 
 const FOLDER_STYLES = {
@@ -225,7 +225,7 @@ export default function Files({ windowId, context }) {
     const vidExts      = ["mp4","webm","ogg","mov"]
     const audioExts    = ["mp3","m4a","ogg","wav","flac","aac","opus"]
     const codeExts     = ["js","jsx","ts","tsx","css","json","py","sh"]
-    const arcExts      = ["zip","rar","tar","gz","7z"]
+    const arcExts      = ["zip","rar","tar","gz","7z","tgz"]
     const docExts      = ["txt","log","md","markdown","csv","tsv","xml","html","htm","pdf","xlsx","xls","xlsm","ods"]
     // Helper: fetch raw text content for small text-based files (e.g. .url shortcuts)
     const getTextContent = async () => {
@@ -558,7 +558,7 @@ export default function Files({ windowId, context }) {
     const isImg    = ["jpg","jpeg","png","gif","webp","svg","bmp"].includes(ext)
     const isVid    = ["mp4","webm","ogg","mov","mkv","avi","flv","wmv"].includes(ext)
     const isAud    = ["mp3","m4a","ogg","wav","flac","aac","opus"].includes(ext)
-    const isArc    = ["zip","rar","tar","gz","7z"].includes(ext)
+    const isArc    = ["zip","rar","tar","gz","7z","tgz"].includes(ext)
     const isSpreadsheet = ["xlsx","xls","xlsm","ods"].includes(ext)
     const isText   = ["txt","md","html","css","js","jsx","ts","tsx","json","py","sh","csv","xml","yaml","yml","ini","cfg","conf","log","url"].includes(ext)
     const isUrl    = ext === "url"

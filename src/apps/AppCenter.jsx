@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import {
   Search, Play, Download, Trash2, ArrowLeft,
   Gamepad2, Briefcase, Palette, Code2, Wrench, Tv, BookOpen,
-  ExternalLink, X, Sparkles, Check, Globe, Pencil, Plus, ShieldCheck, ChevronDown,
+  ExternalLink, X, Sparkles, Check, Globe, Pencil, Plus, ShieldCheck, ChevronDown, Eye, EyeOff,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '../store/useStore'
@@ -140,6 +140,7 @@ function AppEditModal({ initial, onSave, onClose, saving }) {
     allowIframe: initial?.allowIframe  ?? true,
     showCursor:  initial?.showCursor   ?? true,
     featured:    initial?.featured     ?? false,
+    is_live:     initial?.is_live      ?? true,
     tags:        initial?.tags?.[0] || 'utility',
     icon_url:    initial?.icon_url     || '',
     cover_image: initial?.cover_image  || '',
@@ -171,6 +172,7 @@ function AppEditModal({ initial, onSave, onClose, saving }) {
         allowIframe: form.allowIframe,
         showCursor:  form.showCursor,
         featured:    form.featured,
+        is_live:     form.is_live,
         tags:        [form.tags],
         icon_url:    form.icon_url.trim(),
         cover_image: form.cover_image.trim(),
@@ -326,6 +328,18 @@ function AppEditModal({ initial, onSave, onClose, saving }) {
                   <div>
                     <span className="text-white/80 text-[12.5px] font-medium">Featured</span>
                     <span className="text-white/35 text-[11px] ml-2">Show in the ✨ Featured row on Discover</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button type="button"
+                    className="flex items-center justify-center rounded-lg flex-shrink-0 transition-colors"
+                    style={{ width: 22, height: 22, background: form.is_live ? 'rgba(34,197,94,0.9)' : 'rgba(255,255,255,0.1)', border: '1.5px solid rgba(255,255,255,0.2)' }}
+                    onClick={() => setField('is_live', !form.is_live)}>
+                    {form.is_live && <Check size={11} className="text-white" strokeWidth={3} />}
+                  </button>
+                  <div>
+                    <span className="text-white/80 text-[12.5px] font-medium">Published</span>
+                    <span className="text-white/35 text-[11px] ml-2">Change the publication status of the app</span>
                   </div>
                 </div>
               </div>
@@ -535,6 +549,17 @@ function AppCard({ app, onSelect, isInstalled, onInstall, onUninstall, editMode,
             <Check size={9} className="text-white" strokeWidth={3} />
           </div>
         )}
+        {/* Live/not-live badge — visible in edit mode only */}
+        {editMode && (
+          <div className="absolute top-2 left-2 z-10 flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold tracking-wide pointer-events-none"
+            style={app.is_live !== false
+              ? { background: 'rgba(34,197,94,0.88)', color: '#fff', boxShadow: '0 2px 6px rgba(34,197,94,0.4)' }
+              : { background: 'rgba(239,68,68,0.85)', color: '#fff', boxShadow: '0 2px 6px rgba(239,68,68,0.4)' }
+            }>
+            {app.is_live !== false ? <Eye size={8} /> : <EyeOff size={8} />}
+            {app.is_live !== false ? 'Live' : 'Draft'}
+          </div>
+        )}
         {/* Edit mode overlay — pointer-events-none on container so card click still opens detail */}
         {editMode && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity"
@@ -622,6 +647,17 @@ function HeroCard({ app, onSelect, isInstalled, onInstall, onUninstall, onLaunch
       <div className="absolute top-3 right-3 z-10" style={{ filter: 'drop-shadow(0 4px 12px rgba(0,0,0,0.6))' }}>
         <CatalogTile app={app} size={44} />
       </div>
+      {/* Live/not-live badge in edit mode */}
+      {editMode && (
+        <div className="absolute top-3 left-3 z-10 flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold tracking-wide pointer-events-none"
+          style={app.is_live !== false
+            ? { background: 'rgba(34,197,94,0.88)', color: '#fff', boxShadow: '0 2px 6px rgba(34,197,94,0.4)' }
+            : { background: 'rgba(239,68,68,0.85)', color: '#fff', boxShadow: '0 2px 6px rgba(239,68,68,0.4)' }
+          }>
+          {app.is_live !== false ? <Eye size={8} /> : <EyeOff size={8} />}
+          {app.is_live !== false ? 'Live' : 'Draft'}
+        </div>
+      )}
       {editMode && (
         <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity"
           style={{ background: 'rgba(0,0,0,0.62)' }}>
@@ -648,13 +684,13 @@ function HeroCard({ app, onSelect, isInstalled, onInstall, onUninstall, onLaunch
           </button>
           {isInstalled ? (
             <button onClick={e => { e.stopPropagation(); onUninstall(app.id) }}
-              className="flex items-center px-2.5 py-1.5 rounded-lg text-red-400/80 text-[11px] transition-all"
+              className="flex items-center justify-center px-2.5 py-1.5 rounded-lg text-red-400/80 text-[11px] transition-all"
               style={{ background: 'rgba(255,80,80,0.16)' }}>
               <Trash2 size={11} />
             </button>
           ) : (
             <button onClick={e => { e.stopPropagation(); onInstall(app.id) }}
-              className="flex items-center px-2.5 py-1.5 rounded-lg text-white/65 text-[11px] transition-all"
+              className="flex items-center justify-center px-2.5 py-1.5 rounded-lg text-white/65 text-[11px] transition-all"
               style={{ background: 'rgba(255,255,255,0.13)' }}>
               <Download size={11} />
             </button>
@@ -701,11 +737,22 @@ function FeaturedCard({ app, onSelect, isInstalled, onInstall, onUninstall, onLa
       <div className="absolute inset-0" style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.0) 25%, rgba(0,0,0,0.78) 100%)' }} />
 
       {/* FEATURED badge */}
-      <div className="absolute top-2.5 left-3 z-10">
+      <div className="absolute top-2.5 left-3 z-10 flex items-center gap-1.5">
         <span className="text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full"
           style={{ background: 'rgba(245,158,11,0.88)', color: '#fff', letterSpacing: '0.1em', boxShadow: '0 2px 8px rgba(245,158,11,0.4)' }}>
           ✦ Featured
         </span>
+        {/* Live/not-live badge in edit mode */}
+        {editMode && (
+          <span className="flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full pointer-events-none"
+            style={app.is_live !== false
+              ? { background: 'rgba(34,197,94,0.88)', color: '#fff' }
+              : { background: 'rgba(239,68,68,0.85)', color: '#fff' }
+            }>
+            {app.is_live !== false ? <Eye size={8} /> : <EyeOff size={8} />}
+            {app.is_live !== false ? 'Live' : 'Draft'}
+          </span>
+        )}
       </div>
 
       {/* Icon top-right */}
@@ -742,13 +789,13 @@ function FeaturedCard({ app, onSelect, isInstalled, onInstall, onUninstall, onLa
           </button>
           {isInstalled ? (
             <button onClick={e => { e.stopPropagation(); onUninstall(app.id) }}
-              className="flex items-center px-2.5 py-1.5 rounded-lg text-red-400/80 text-[11px] transition-all"
+              className="flex items-center justify-center px-2.5 py-1.5 rounded-lg text-red-400/80 text-[11px] transition-all"
               style={{ background: 'rgba(255,80,80,0.18)' }}>
               <Trash2 size={11} />
             </button>
           ) : (
             <button onClick={e => { e.stopPropagation(); onInstall(app.id) }}
-              className="flex items-center px-2.5 py-1.5 rounded-lg text-white/65 text-[11px] transition-all"
+              className="flex items-center justify-center px-2.5 py-1.5 rounded-lg text-white/65 text-[11px] transition-all"
               style={{ background: 'rgba(255,255,255,0.14)' }}>
               <Download size={11} />
             </button>

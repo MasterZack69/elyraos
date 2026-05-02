@@ -6,7 +6,7 @@
     "scripts": {
         "dev": "vite",
         "server": "node server/index.js",
-        "server:dev": "node --watch-path=./server server/index.js",
+        "server:dev": "node --watch-path=./server/routes --watch-path=./server/index.js --watch-path=./server/config.js --watch-path=./server/db.js --watch-path=./server/mailer.js --watch-path=./server/sseClients.js server/index.js",
         "dev:full": "concurrently -n server,vite -c blue,green --kill-others-on-fail \"npm run server:dev\" \"npm run dev\"",
         "build": "vite build",
         "preview": "vite preview",

@@ -327,7 +327,13 @@ export const useAuthStore = create((set, get) => ({
 
       // Real-time catalog updates pushed by admin edits
       es.addEventListener('catalog-update', (e) => {
-        try { useStore.getState().applyCatalogUpdate(JSON.parse(e.data)) } catch {}
+        try {
+          const data = JSON.parse(e.data)
+          const isAdmin = useAuthStore.getState().currentUserIsAdmin
+          // Non-admin clients filter out non-live apps from SSE-pushed catalog updates
+          if (!isAdmin && data.apps) data.apps = data.apps.filter(a => a.is_live !== false)
+          useStore.getState().applyCatalogUpdate(data)
+        } catch {}
       })
 
       es.onerror = () => {

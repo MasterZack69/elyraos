@@ -242,6 +242,7 @@ router.post('/copy/:sourceId', (req, res) => {
 // The client sends X-File-Size with the total file size so the quota check
 // can validate against the full file on seq=0 without needing all chunks first.
 router.put('/stream/:nodeId', async (req, res) => {
+  let ws
   try {
     const fp    = safeFilePath(req.user.id, req.params.nodeId)
     const seq   = parseInt(req.query.seq   ?? '0', 10)
@@ -271,11 +272,20 @@ router.put('/stream/:nodeId', async (req, res) => {
     }
 
     // seq=0 → write (create/overwrite); seq>0 → append subsequent chunks
-    const ws = createWriteStream(fp, { flags: seq === 0 ? 'w' : 'a' })
+    ws = createWriteStream(fp, { flags: seq === 0 ? 'w' : 'a' })
     await pipelineAsync(req, ws)
     res.json({ ok: true, seq, done: seq === total - 1 })
   } catch (e) {
-    if (e.code === 'ERR_STREAM_PREMATURE_CLOSE') return res.status(499).end()
-    res.status(400).json({ error: e.message })
+    // Always destroy the write stream on any error so the fd is released
+    if (ws && !ws.destroyed) ws.destroy()
+    // Drain remaining request body to avoid ECONNRESET / EPIPE on the client side
+    if (!req.readableEnded) req.resume()
+
+    // Client disconnected / CF tunnel dropped the connection — not a server error
+    const abortCodes = new Set(['ERR_STREAM_PREMATURE_CLOSE', 'ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ERR_STREAM_DESTROYED'])
+    if (abortCodes.has(e.code) || e.message === 'request aborted') {
+      return res.headersSent ? res.end() : res.status(499).end()
+    }
+    if (!res.headersSent) res.status(500).json({ error: e.message })
   }
 })

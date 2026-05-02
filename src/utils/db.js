@@ -101,7 +101,9 @@ async function _aiH() {
 export async function dbInit() {
   if (_jwt) {
     try {
-      const res = await fetch(`${API}/data`, { headers: await _aiH() })
+      const res = await fetch(`${API}/data`, {
+        headers: { ...(await _aiH()), 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+      })
       const qt = res.headers.get('x-nv-qt');  if (qt) setQp(qt)
       if (res.ok) {
         const data = await res.json()
@@ -305,8 +307,27 @@ export function fsRawUrl(nodeId, name) {
  * Sends raw bytes directly — server writes them to disk without buffering.
  * Supports upload progress events and cancellation via AbortSignal.
  */
-// 95 MB per chunk — stays safely under Cloudflare Tunnels' 100 MB request limit.
-const CHUNK_SIZE = 95 * 1024 * 1024
+// 80 MB per chunk — 20 MB headroom under Cloudflare Tunnels' 100 MB hard limit.
+// (95 MB was too close; CF enforcement is slightly below the stated limit and
+//  HTTP headers/framing can push a 95 MB body over the edge.)
+const CHUNK_SIZE = 80 * 1024 * 1024
+
+// ── Upload semaphore ──────────────────────────────────────────────────────────
+// Limits concurrent XHR requests to 1 — files are uploaded one at a time.
+// Others are queued and proceed only after the previous upload fully completes.
+const MAX_UPLOAD_SLOTS = 1
+let   _uploadSlots = 0
+const _uploadQueue  = []
+
+function _semAcquire() {
+  if (_uploadSlots < MAX_UPLOAD_SLOTS) { _uploadSlots++; return Promise.resolve() }
+  return new Promise(resolve => _uploadQueue.push(resolve))
+}
+function _semRelease() {
+  const next = _uploadQueue.shift()
+  if (next) { next() }            // hand slot directly to the next waiter
+  else       { _uploadSlots-- }   // no waiter — free the slot
+}
 
 export function fsUploadStream(nodeId, file, onProgress, signal) {
   // Guest sessions have no JWT — never write to the server
@@ -333,14 +354,19 @@ export function fsUploadStream(nodeId, file, onProgress, signal) {
 }
 
 function _fsChunk(nodeId, blob, seq, total, fileSize, onProgress, signal) {
-  return new Promise((resolve, reject) => {
+  // Retry wrapper: up to 3 attempts with exponential backoff (1 s, 2 s, 4 s).
+  // Cancellations are never retried.
+  const attempt = (attemptsLeft, delay) => _semAcquire().then(() => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+    let released = false
+    const release = () => { if (!released) { released = true; _semRelease() } }
+
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress?.(e.loaded / e.total)
     }
     xhr.onload = () => {
-      // Rotate the pass if the server issued a fresh one
-      const qt = xhr.getResponseHeader('x-nv-qt');  if (qt) setQp(qt)
+      release()
+      const qt = xhr.getResponseHeader('x-nv-qt'); if (qt) setQp(qt)
       if (xhr.status < 400) {
         try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({ ok: true }) }
       } else {
@@ -348,8 +374,11 @@ function _fsChunk(nodeId, blob, seq, total, fileSize, onProgress, signal) {
         catch { reject(new Error('Upload failed')) }
       }
     }
-    xhr.onerror = () => reject(new Error('Upload failed'))
-    xhr.onabort = () => reject(Object.assign(new Error('Upload cancelled'), { cancelled: true }))
+    xhr.onerror = () => { release(); reject(new Error('Upload failed')) }
+    xhr.onabort = () => {
+      release()
+      reject(Object.assign(new Error('Upload cancelled'), { cancelled: true }))
+    }
     if (signal) signal.addEventListener('abort', () => xhr.abort())
     xhr.open('PUT', `${API}/fs/stream/${encodeURIComponent(nodeId)}?seq=${seq}&total=${total}`)
     if (_jwt) xhr.setRequestHeader('Authorization', `Bearer ${_jwt}`)
@@ -357,7 +386,14 @@ function _fsChunk(nodeId, blob, seq, total, fileSize, onProgress, signal) {
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
     xhr.setRequestHeader('X-File-Size', String(fileSize))
     xhr.send(blob)
+  })).catch(err => {
+    if (err.cancelled || attemptsLeft <= 1) throw err
+    // Network error — wait then retry
+    return new Promise(r => setTimeout(r, delay))
+      .then(() => attempt(attemptsLeft - 1, delay * 2))
   })
+
+  return attempt(3, 1000)
 }
 
 /**

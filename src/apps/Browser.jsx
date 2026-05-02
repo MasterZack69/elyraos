@@ -37,7 +37,11 @@ function buildProxiedSrcdoc(html, jwt) {
   function isExt(u){
     if(!u||typeof u!=='string')return false;
     var s=u.trim();
-    if(/^(\/|data:|blob:|javascript:|#|about:)/i.test(s))return false;
+    if(/^(data:|blob:|javascript:|#|about:)/i.test(s))return false;
+    // Resolve relative/root-relative URLs to absolute using the injected base
+    if(!/^https?:\/\//i.test(s)){
+      try{s=new URL(s,document.baseURI||location.href).href;}catch(e){return false;}
+    }
     try{
       var h=new URL(s).hostname;
       if(!h)return false;
@@ -56,6 +60,8 @@ function buildProxiedSrcdoc(html, jwt) {
   window.fetch=function(input,opts){
     var method=((opts&&opts.method)||'GET').toUpperCase();
     var url=typeof input==='string'?input:(input&&input.url?input.url:String(input||''));
+    // Resolve relative URLs before isExt check
+    if(url&&!/^https?:\/\//i.test(url)){try{url=new URL(url,document.baseURI||location.href).href;}catch(e){}}
     if(method!=='GET'||!isExt(url))return oFetch(input,opts);
     return oFetch(RAW+encodeURIComponent(url),{headers:{'Authorization':'Bearer '+T}});
   };
@@ -63,8 +69,11 @@ function buildProxiedSrcdoc(html, jwt) {
   // 3. Intercept XHR — GET only
   XMLHttpRequest.prototype.open=function(method,url){
     var args=[].slice.call(arguments);
-    if((method||'').toUpperCase()==='GET'&&isExt(String(url||''))){
-      this._pxUrl=RAW+encodeURIComponent(String(url));
+    var resolvedUrl=String(url||'');
+    // Resolve relative URLs before isExt check
+    if(resolvedUrl&&!/^https?:\/\//i.test(resolvedUrl)){try{resolvedUrl=new URL(resolvedUrl,document.baseURI||location.href).href;}catch(e){}}
+    if((method||'').toUpperCase()==='GET'&&isExt(resolvedUrl)){
+      this._pxUrl=RAW+encodeURIComponent(resolvedUrl);
       args[1]=this._pxUrl;
     }
     return oOpen.apply(this,args);
@@ -147,6 +156,11 @@ export default function Browser() {
   const dlHandlerRef    = useRef(null)
   const iframeRef       = useRef(null)
   const displayUrlRef   = useRef(HOME_URL)
+  // Refs that stay current inside async callbacks without causing dep-cycle issues
+  const histRef    = useRef([HOME_URL]) // mirrors hist state
+  const histIdxRef = useRef(0)         // mirrors histIdx state
+  const loadNonce  = useRef(0)         // incremented on every new load; stale loads bail early
+  const loadingRef = useRef(false)     // mirrors loading state; readable synchronously in onLoad
 
   const createNode = useStore(s => s.createNode)
   const listDir    = useStore(s => s.listDir)
@@ -186,6 +200,9 @@ export default function Browser() {
   // Core loader: fetches the URL through the server proxy and updates srcdoc,
   // or sets directSrc for domains that should load natively in the iframe.
   const loadUrl = useCallback(async (url, push = true) => {
+    // Stamp this load so any concurrent in-flight loads can detect they're stale
+    const myNonce = ++loadNonce.current
+    loadingRef.current = true
     setLoading(true)
     setError(null)
 
@@ -197,8 +214,12 @@ export default function Browser() {
       displayUrlRef.current = url
       setInputVal(url)
       if (push) {
-        setHist(h => [...h.slice(0, histIdx + 1), url])
-        setHistIdx(i => i + 1)
+        const newIdx  = histIdxRef.current + 1
+        const newHist = [...histRef.current.slice(0, newIdx), url]
+        histRef.current    = newHist
+        histIdxRef.current = newIdx
+        setHist(newHist)
+        setHistIdx(newIdx)
       }
       setLoading(false)
       return
@@ -214,6 +235,8 @@ export default function Browser() {
         throw new Error(err.error || 'Failed to load page')
       }
       const data = await res.json()
+      // Bail if a newer navigation started while this fetch was in flight
+      if (myNonce !== loadNonce.current) return
       // Auto-download binary files instead of showing a dead-end page
       if (data.type === 'binary') {
         const fname = url.split('/').pop().split('?')[0] || 'download'
@@ -227,17 +250,25 @@ export default function Browser() {
       displayUrlRef.current = finalUrl
       setInputVal(finalUrl)
       if (push) {
-        setHist(h => [...h.slice(0, histIdx + 1), finalUrl])
-        setHistIdx(i => i + 1)
+        // Use refs so we always slice at the correct position even if React
+        // hasn't re-rendered histIdx state yet (avoids stale-closure bug)
+        const newIdx  = histIdxRef.current + 1
+        const newHist = [...histRef.current.slice(0, newIdx), finalUrl]
+        histRef.current    = newHist
+        histIdxRef.current = newIdx
+        setHist(newHist)
+        setHistIdx(newIdx)
       }
     } catch (err) {
+      if (myNonce !== loadNonce.current) return
       setError(err.message)
     } finally {
-      setLoading(false)
+      if (myNonce === loadNonce.current) {
+        loadingRef.current = false
+        setLoading(false)
+      }
     }
-  // histIdx is only needed for the push-to-history logic
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [histIdx])
+  }, []) // refs are always current — no histIdx dep needed
 
   // Load the home page on first mount
   useEffect(() => { loadUrl(HOME_URL, false) }, []) // eslint-disable-line
@@ -268,8 +299,20 @@ export default function Browser() {
   const canBack    = histIdx > 0
   const canForward = histIdx < hist.length - 1
 
-  const goBack    = () => { if (!canBack)    return; const i = histIdx - 1; setHistIdx(i); loadUrl(hist[i], false) }
-  const goForward = () => { if (!canForward) return; const i = histIdx + 1; setHistIdx(i); loadUrl(hist[i], false) }
+  const goBack = () => {
+    if (!canBack) return
+    const i = histIdxRef.current - 1
+    histIdxRef.current = i          // sync ref before async loadUrl reads it
+    setHistIdx(i)
+    loadUrl(histRef.current[i], false)
+  }
+  const goForward = () => {
+    if (!canForward) return
+    const i = histIdxRef.current + 1
+    histIdxRef.current = i
+    setHistIdx(i)
+    loadUrl(histRef.current[i], false)
+  }
   const reload    = () => loadUrl(displayUrl, false)
 
   // Save the current page's HTML source as a file
@@ -434,9 +477,15 @@ export default function Browser() {
                 if (!href || href.startsWith('about:')) return
                 navigate(href)
               } catch {
-                // SecurityError = iframe navigated cross-origin → re-proxy
-                const url = displayUrlRef.current
-                if (url && !url.startsWith('about:')) loadUrl(url, false)
+                // SecurityError = iframe navigated cross-origin (e.g. Bing's JS set location.href).
+                // IMPORTANT: if navigate() was already called from a nova-nav message (e.g. user
+                // clicked "Next page" and our interceptor caught it), a load is already in-flight
+                // for the CORRECT next page. Calling loadUrl here would cancel that in-flight load
+                // via the nonce system and reload page 1 instead. Only fall back when idle.
+                if (!loadingRef.current) {
+                  const url = displayUrlRef.current
+                  if (url && !url.startsWith('about:')) loadUrl(url, false)
+                }
               }
             }}
           />

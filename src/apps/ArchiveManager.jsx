@@ -3,7 +3,7 @@ import {
   FolderOpen, Folder, FileText, Image, Music, Video, FileCode, Archive,
   Package, Download, ChevronRight, Home, ArrowUp,
 } from "lucide-react"
-import { unzip } from "fflate"
+import { unzip, gunzip } from "fflate"
 import { fsQuota, fsRawUrl, fsUploadStream } from "../utils/db"
 import { useStore, findNode } from "../store/useStore"
 
@@ -14,7 +14,7 @@ const EXT_ICONS = {
   mp4: Video, webm: Video, mkv: Video, mov: Video,
   js: FileCode, ts: FileCode, jsx: FileCode, tsx: FileCode,
   html: FileCode, css: FileCode, json: FileCode, py: FileCode, sh: FileCode,
-  zip: Archive, rar: Archive, tar: Archive, gz: Archive,
+  zip: Archive, rar: Archive, tar: Archive, gz: Archive, '7z': Archive, tgz: Archive,
 }
 
 const MIME_MAP = {
@@ -32,7 +32,7 @@ const BINARY_EXTS = new Set([
   'doc','docx','xls','xlsx','ppt','pptx','exe','dll','bin','dat',
 ])
 
-const ARC_EXTS = ['zip','rar','tar','gz','7z']
+const ARC_EXTS = ['zip','rar','tar','gz','7z','tgz']
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -51,8 +51,14 @@ function fmtBytes(n) {
 
 // Parse any supported archive (Uint8Array) → flat entries array, or null if unreadable.
 // entry: { path: string, size: number, getBytes: () => Uint8Array }
-function parseArchive(u8) {
+async function parseArchive(u8) {
   if (!u8 || u8.length < 4) return null
+
+  // ── RAR / 7-Zip — no pure-JS decompressor available ──────────────────────
+  const isRar = u8[0] === 0x52 && u8[1] === 0x61 && u8[2] === 0x72 && u8[3] === 0x21 // Rar!
+  const is7z  = u8[0] === 0x37 && u8[1] === 0x7a && u8[2] === 0xbc && u8[3] === 0xaf // 7z magic
+  if (isRar) throw new Error('RAR archives cannot be opened in the browser. Please extract on your device first.')
+  if (is7z)  throw new Error('7-Zip archives cannot be opened in the browser. Please extract on your device first.')
 
   // ── 1. Legacy Elyra archive (JSON text format) ────────────────────────────
   // Old archives were JSON strings stored via the content endpoint.
@@ -86,22 +92,90 @@ function parseArchive(u8) {
   }
 
   // ── 2. Real ZIP via fflate (async — runs in a worker, never blocks the UI) ────
-  if (u8[0] !== 0x50 || u8[1] !== 0x4b) return null  // no PK magic → not a ZIP
-
-  return new Promise((resolve, reject) => {
-    unzip(u8, (err, decompressed) => {
-      if (err) { reject(err); return }
-      resolve(
-        Object.entries(decompressed)
-          .filter(([p]) => !p.endsWith('/'))
-          .map(([p, fileU8]) => ({
-            path:     p.replace(/^\//,''),
-            size:     fileU8.length,
-            getBytes: () => fileU8,
-          }))
-      )
+  if (u8[0] === 0x50 && u8[1] === 0x4b) { // PK magic → ZIP
+    return new Promise((resolve, reject) => {
+      unzip(u8, (err, decompressed) => {
+        if (err) { reject(err); return }
+        resolve(
+          Object.entries(decompressed)
+            .filter(([p]) => !p.endsWith('/'))
+            .map(([p, fileU8]) => ({
+              path:     p.replace(/^\//, ''),
+              size:     fileU8.length,
+              getBytes: () => fileU8,
+            }))
+        )
+      })
     })
-  })
+  }
+
+  // ── 3. GZIP — decompress then check for embedded TAR ─────────────────────
+  if (u8[0] === 0x1f && u8[1] === 0x8b) { // gzip magic
+    const inner = await new Promise((resolve, reject) =>
+      gunzip(u8, (err, data) => err ? reject(err) : resolve(data))
+    )
+    // If the decompressed data looks like a TAR, parse it as TAR
+    const tarEntries = parseTar(inner)
+    if (tarEntries && tarEntries.length > 0) return tarEntries
+    // Otherwise treat as a single compressed file — derive name from header
+    // (no easy way to get original filename here, just return raw bytes)
+    return [{ path: 'decompressed.bin', size: inner.length, getBytes: () => inner }]
+  }
+
+  // ── 4. TAR — parse sequential 512-byte header+data blocks ─────────────────
+  const tarEntries = parseTar(u8)
+  if (tarEntries && tarEntries.length > 0) return tarEntries
+
+  return null
+}
+
+// ── TAR parser ───────────────────────────────────────────────────────────────
+// Supports POSIX ustar and GNU TAR (including long-name 'L' entries).
+function parseTar(u8) {
+  const dec     = new TextDecoder()
+  const entries = []
+  let   i       = 0
+  let   pendingLongName = null   // GNU TAR \x4c long-name extension
+
+  const readStr = (buf, off, len) => {
+    let end = off
+    while (end < off + len && buf[end] !== 0) end++
+    return dec.decode(buf.slice(off, end))
+  }
+
+  while (i + 512 <= u8.length) {
+    const header = u8.slice(i, i + 512)
+    if (header.every(b => b === 0)) break          // end-of-archive sentinel
+
+    const rawName  = readStr(header, 0, 100)
+    const sizeStr  = readStr(header, 124, 12).trim()
+    const typeflag = String.fromCharCode(header[156])
+    const prefix   = readStr(header, 345, 155)     // ustar prefix field
+
+    const size = parseInt(sizeStr, 8) || 0
+    i += 512  // advance past header
+
+    // GNU TAR long-name entry ('L'): next entry's real name is in this data block
+    if (typeflag === 'L' || typeflag === '\x4c') {
+      pendingLongName = dec.decode(u8.slice(i, i + size)).replace(/\0+$/, '')
+      i += Math.ceil(size / 512) * 512
+      continue
+    }
+
+    const fullName = pendingLongName
+      || (prefix ? prefix.replace(/\/$/, '') + '/' + rawName : rawName)
+    pendingLongName = null
+
+    const cleanPath = fullName.replace(/^\//, '')
+    const isDir     = typeflag === '5' || cleanPath.endsWith('/')
+
+    if (!isDir && cleanPath && size > 0) {
+      const data = u8.slice(i, i + size)   // slice is zero-copy
+      entries.push({ path: cleanPath, size, getBytes: () => data })
+    }
+    i += Math.ceil(size / 512) * 512
+  }
+  return entries.length > 0 ? entries : null
 }
 
 // Collect all archive nodes in the FS tree

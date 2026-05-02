@@ -22,6 +22,7 @@ router.get('/', async (req, res) => {
     )
     const result = {}
     for (const row of rows) result[row.key] = row.value  // pg parses JSONB columns automatically
+    res.set('Cache-Control', 'no-store')
     res.json(result)
   } catch (e) {
     console.error('GET /data', e.message)

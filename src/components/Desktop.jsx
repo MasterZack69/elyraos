@@ -12,10 +12,10 @@ import { useFileUpload } from "../hooks/useFileUpload"
 const FS_EXT_ICONS = {
   jpg: Image, jpeg: Image, png: Image, gif: Image, webp: Image, svg: Image,
   mp3: Music, wav: Music, ogg: Music,
-  mp4: Video, mkv: Video, webm: Video,
+  mp4: Video, mkv: Video, webm: Video, mov: Video, avi: Video, m4v: Video,
   js: FileCode, ts: FileCode, jsx: FileCode, tsx: FileCode,
   css: FileCode, html: FileCode, py: FileCode, sh: FileCode,
-  zip: Archive, tar: Archive, gz: Archive,
+  zip: Archive, tar: Archive, gz: Archive, rar: Archive, '7z': Archive, tgz: Archive,
 }
 function FsItemIcon({ node, size = 52 }) {
   if (node.type === 'folder') {
@@ -42,6 +42,7 @@ function getFileApp(name) {
   const ext = (name.split('.').pop() || '').toLowerCase()
   if (['jpg','jpeg','png','gif','webp','bmp'].includes(ext)) return { appId: 'photoviewer', appType: 'photo-viewer' }
   if (['mp4','webm','ogg','mov'].includes(ext)) return { appId: 'videoplayer', appType: 'video-player' }
+  if (['zip','rar','tar','gz','7z','tgz'].includes(ext)) return { appId: 'archive', appType: 'archive-manager' }
   if (['js','jsx','ts','tsx','css','json','py','sh'].includes(ext)) return { appId: 'codeeditor', appType: 'code-editor' }
   if (['txt','log','md','markdown','csv','tsv','xml','html','htm','pdf','xlsx','xls','xlsm','ods'].includes(ext)) return { appId: 'docviewer', appType: 'doc-viewer' }
   return { appId: 'notes', appType: 'notes' }
@@ -136,6 +137,156 @@ export default function Desktop() {
   const iconRefs   = useRef({})
   const didDrag    = useRef(false) // tracks if mouse moved during mousedown (rubber-band)
 
+  // ── Touch drag refs ───────────────────────────────────────────────────────
+  const touchDropRef        = useRef(null)
+  const desktopLongPressRef = useRef(null)
+  // Mirrors selectedIds so the drag closure never holds a stale array
+  const selectedIdsRef = useRef(selectedIds)
+  selectedIdsRef.current = selectedIds
+  // Always-fresh refs to context-menu handlers (defined later in the component)
+  const ctxHandlerRef = useRef({})
+
+  // ── Desktop touch drag handler ────────────────────────────────────────────
+  // Same two-phase model as the Dock: suppress contextmenu immediately, then:
+  //   Phase 1 (0–500 ms): cancel if finger moves (scroll intent)
+  //   Phase 2 (500 ms+):  vibrate → enter drag-ready; first move > 6 px starts drag
+  //   touchend without drag: show context menu at last touch position
+  const handleDesktopTouchStart = useCallback((e) => {
+    if (!isTouchDevice) return
+    if (e.touches.length !== 1) return
+    const iconEl = e.target.closest('[data-desktop-icon]')
+    if (!iconEl) return
+    const iconId = iconEl.dataset.iconId
+    if (!iconId) return
+    if (renamingIdRef.current) return
+
+    const touch  = e.touches[0]
+    const startX = touch.clientX
+    const startY = touch.clientY
+    const isFsItem = iconId.startsWith('fs:')
+    let lastX = startX, lastY = startY
+    let longPressed = false
+    let dragStarted = false
+    let ghost = null
+
+    // Suppress browser contextmenu immediately (see Dock handler for rationale)
+    const suppressCtx = (ev) => ev.preventDefault()
+    document.addEventListener('contextmenu', suppressCtx, { capture: true })
+
+    let beforeMove, afterMove, onEnd
+
+    const cleanup = () => {
+      clearTimeout(desktopLongPressRef.current)
+      document.removeEventListener('touchmove', beforeMove)
+      document.removeEventListener('touchmove', afterMove)
+      document.removeEventListener('contextmenu', suppressCtx, true)
+      document.removeEventListener('touchend',    onEnd)
+      document.removeEventListener('touchcancel', onEnd)
+    }
+
+    // Phase 1: abort if finger strays before long-press (user is scrolling)
+    beforeMove = (ev) => {
+      const t = ev.touches[0]
+      lastX = t.clientX; lastY = t.clientY
+      if (Math.abs(t.clientX - startX) > 10 || Math.abs(t.clientY - startY) > 10) cleanup()
+    }
+    document.addEventListener('touchmove', beforeMove, { passive: true })
+
+    // Phase 2: track movement after long-press; first meaningful move starts drag
+    afterMove = (ev) => {
+      ev.preventDefault()
+      const t = ev.touches[0]
+      lastX = t.clientX; lastY = t.clientY
+
+      if (!dragStarted && (Math.abs(t.clientX - startX) > 6 || Math.abs(t.clientY - startY) > 6)) {
+        dragStarted = true
+        useStore.getState().hideContextMenu()
+        const rect = iconEl.getBoundingClientRect()
+        ghost = iconEl.cloneNode(true)
+        Object.assign(ghost.style, {
+          position: 'fixed',
+          left: rect.left + 'px', top: rect.top + 'px',
+          width: rect.width + 'px', height: rect.height + 'px',
+          pointerEvents: 'none', zIndex: '99999',
+          opacity: '0.85', transform: 'scale(1.15)',
+          transition: 'transform 0.12s ease',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+        })
+        document.body.appendChild(ghost)
+        touchDropRef.current = null
+        if (isFsItem) setDraggingIds([iconId.slice(3)])
+        else setDragAppId(iconId)
+      }
+
+      if (dragStarted && ghost) {
+        const rect = iconEl.getBoundingClientRect()
+        ghost.style.left = (rect.left + (t.clientX - startX)) + 'px'
+        ghost.style.top  = (rect.top  + (t.clientY - startY)) + 'px'
+        ghost.style.visibility = 'hidden'
+        const under = document.elementFromPoint(t.clientX, t.clientY)
+        ghost.style.visibility = 'visible'
+        const targetEl = under?.closest('[data-desktop-icon]')
+        const targetId = targetEl?.dataset.iconId ?? null
+        const dropId   = (targetId && targetId !== iconId) ? targetId : null
+        touchDropRef.current = dropId
+        if (isFsItem) {
+          const targetFsId = dropId?.startsWith('fs:') ? dropId.slice(3) : null
+          const targetNode = targetFsId ? findNode(useStore.getState().fsRoot, targetFsId) : null
+          setDropTarget(targetNode?.type === 'folder' ? targetFsId : 'desktop')
+        } else {
+          setDropOverAppId(dropId && !dropId.startsWith('fs:') ? dropId : null)
+        }
+      }
+    }
+
+    onEnd = () => {
+      cleanup()
+      if (ghost && document.body.contains(ghost)) document.body.removeChild(ghost)
+      ghost = null
+
+      if (dragStarted) {
+        const dropId = touchDropRef.current
+        touchDropRef.current = null
+        if (dropId) {
+          if (!isFsItem && !dropId.startsWith('fs:')) {
+            reorderDesktopItem(iconId, dropId)
+          } else if (isFsItem && dropId.startsWith('fs:')) {
+            const targetFsId = dropId.slice(3)
+            const targetNode = findNode(useStore.getState().fsRoot, targetFsId)
+            if (targetNode?.type === 'folder' && targetFsId !== iconId.slice(3)) {
+              const selFsIds = selectedIdsRef.current.filter(id => id.startsWith('fs:')).map(id => id.slice(3))
+              const idsToMove = selFsIds.includes(iconId.slice(3)) ? selFsIds : [iconId.slice(3)]
+              idsToMove.forEach(id => moveNode(id, targetFsId))
+              setSelectedIds([])
+            }
+          }
+        }
+        setDraggingIds([]); setDragAppId(null); setDropOverAppId(null); setDropTarget(null)
+      } else if (longPressed) {
+        // Long-press without drag → show context menu at last touch position
+        setDraggingIds([]); setDragAppId(null); setDropOverAppId(null); setDropTarget(null)
+        const synth = { preventDefault: () => {}, stopPropagation: () => {}, clientX: lastX, clientY: lastY }
+        if (isFsItem) {
+          const node = findNode(useStore.getState().fsRoot, iconId.slice(3))
+          if (node) ctxHandlerRef.current.fsCM?.(synth, node)
+        } else {
+          const app = SYSTEM_APPS[iconId] || useStore.getState().catalogApps.find(a => a.id === iconId)
+          if (app) ctxHandlerRef.current.appCM?.(synth, app)
+        }
+      }
+    }
+
+    desktopLongPressRef.current = setTimeout(() => {
+      longPressed = true
+      if (navigator.vibrate) navigator.vibrate(40)
+      document.removeEventListener('touchmove', beforeMove)
+      document.addEventListener('touchmove', afterMove, { passive: false })
+    }, 500)
+
+    document.addEventListener('touchend',    onEnd, { once: true })
+    document.addEventListener('touchcancel', onEnd, { once: true })
+  }, [isTouchDevice, reorderDesktopItem, moveNode])
+
   // Resolve app id to definition
   const resolveApp = (id) => SYSTEM_APPS[id] || catalogApps.find(a => a.id === id) || null
   const apps = desktopItems.map(resolveApp).filter(Boolean)
@@ -209,8 +360,9 @@ export default function Desktop() {
       return
     }
     const { appId, appType } = getFileApp(node.name)
-    const windowId = appType === 'doc-viewer'  ? 'docviewer-' + node.id
-                   : appType === 'code-editor' ? 'code-' + node.id
+    const windowId = appType === 'archive-manager' ? 'archive-' + node.id
+                   : appType === 'doc-viewer'      ? 'docviewer-' + node.id
+                   : appType === 'code-editor'     ? 'code-' + node.id
                    : appId
     openWindow(windowId, appType, node.name, { fileId: node.id, parentId: DESKTOP_FOLDER_ID })
   }
@@ -223,6 +375,7 @@ export default function Desktop() {
     const ext = (node.name.split('.').pop() || '').toLowerCase()
     const isImage = ['jpg','jpeg','png','gif','webp','bmp'].includes(ext)
     const isVideo = ['mp4','webm','ogg','mov'].includes(ext)
+    const isArc   = ['zip','rar','tar','gz','7z','tgz'].includes(ext)
     const isDocViewable = ['txt','log','md','markdown','csv','tsv','json','xml','html','htm','svg','pdf','png','jpg','jpeg','gif','webp','bmp'].includes(ext)
     showContextMenu(e.clientX, e.clientY, [
       { label: node.type === 'folder' ? 'Open Folder' : 'Open', action: () => handleFsItemOpen(node) },
@@ -235,6 +388,7 @@ export default function Desktop() {
           { label: 'Paint', action: () => openWindow('paint-' + node.id, 'paint', node.name, { fileId: node.id }) },
         ] : []),
         ...(isVideo ? [{ label: 'Video Player', action: () => openWindow('videoplayer', 'video-player', node.name, { fileId: node.id, parentId: DESKTOP_FOLDER_ID }) }] : []),
+        ...(isArc ? [{ label: 'Archive Manager', action: () => openWindow('archive-' + node.id, 'archive-manager', node.name, { fileId: node.id, parentId: DESKTOP_FOLDER_ID }) }] : []),
       ]}] : []),
       { type: 'separator' },
       { label: 'Rename', action: () => startRename(node) },
@@ -281,7 +435,7 @@ export default function Desktop() {
         { label: "Type",          action: () => setSortKey("type"),  checked: sortKey === "type" },
         { label: "Date modified", action: () => setSortKey("date"),  checked: sortKey === "date" },
       ]},
-      { label: "Refresh",             action: () => { setSelectedIds([]); setSortKey("name") } },
+      { label: "Refresh",             action: () => { setSelectedIds([]); setSortKey("name"); useStore.getState().reloadFs() } },
       { label: showHidden ? "Hide hidden files" : "Show hidden files", action: () => setShowHidden(v => !v) },
       { label: hideIcons  ? "Show desktop icons" : "Hide desktop icons",  action: () => setHideIcons(v => !v) },
       { type: "separator" },
@@ -369,6 +523,8 @@ export default function Desktop() {
     ])
   }
 
+  // Keep ctxHandlerRef always pointing to the latest versions of both handlers
+  ctxHandlerRef.current = { fsCM: handleFsItemContextMenu, appCM: handleIconContextMenu }
   const handleIconOpen = (app) => {
     openWindow(app.id, app.type, app.title, app.type === "iframe" ? { app } : {})
     addRecentApp(app)
@@ -470,6 +626,7 @@ export default function Desktop() {
           }
         }}
       onMouseDown={handleMouseDown}
+      onTouchStart={isTouchDevice ? handleDesktopTouchStart : undefined}
       onDragOver={!isTouchDevice ? e => { e.preventDefault(); setDropTarget('desktop') } : undefined}
       onDragLeave={!isTouchDevice ? e => { if (!desktopRef.current?.contains(e.relatedTarget)) setDropTarget(null) } : undefined}
       onDrop={!isTouchDevice ? e => {

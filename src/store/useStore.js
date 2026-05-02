@@ -197,8 +197,14 @@ export const useStore = create((set, get) => ({
   // Useful when another tab or external process may have modified the tree.
   async reloadFs() {
     await dbInit()
-    const fresh = loadFromLS(STORAGE_KEYS.fs, null)
-    if (fresh) set({ fsRoot: stripContent(fresh) })
+    // dbInit() fills _cache from the server — read via dbGet (not loadFromLS
+    // which only reads stale localStorage copies).
+    const freshFs    = dbGet(STORAGE_KEYS.fs,    null)
+    const freshTrash = dbGet(STORAGE_KEYS.trash, null)
+    set({
+      ...(freshFs    ? { fsRoot: stripContent(freshFs) } : {}),
+      ...(freshTrash ? { trash:  freshTrash            } : {}),
+    })
   },
 
   // Reinitialise per-user state after a login/switch (called from AuthStore after login)
@@ -522,6 +528,20 @@ export const useStore = create((set, get) => ({
       return { desktopItems: items }
     })
   },
+  reorderDockItem(fromId, toId) {
+    const nonMovable = ["launcher", "trash"]
+    if (nonMovable.includes(fromId) || nonMovable.includes(toId)) return
+    set(s => {
+      const items = [...s.dockItems]
+      const fi = items.indexOf(fromId)
+      const ti = items.indexOf(toId)
+      if (fi === -1 || ti === -1 || fi === ti) return {}
+      items.splice(fi, 1)
+      items.splice(ti, 0, fromId)
+      saveToLS(STORAGE_KEYS.dock, items)
+      return { dockItems: items }
+    })
+  },
 
   // Settings
   settings: { ...DEFAULT_SETTINGS, ...loadFromLS(STORAGE_KEYS.settings, {}), customWallpaper: loadFromLS(STORAGE_KEYS.wallpaper, null) },
@@ -556,6 +576,7 @@ export const useStore = create((set, get) => ({
       description: app.description || '', url: app.url,
       allowIframe: Boolean(app.allowIframe), featured: Boolean(app.featured),
       showCursor:  app.showCursor !== false,
+      is_live:     app.is_live !== false,
       tags: app.tags || [],
       gradient: '', hue: (i * 47) % 360,
       icon:        app.icon_url  || app.icon  || null,
@@ -567,11 +588,14 @@ export const useStore = create((set, get) => ({
   applyCatalogUpdate(data) {
     set({ catalogApps: get().parseCatalogData(data) })
   },
-  async loadCatalog() {
+  async loadCatalog(isAdmin = false) {
     try {
-      // Use the API endpoint (not the static file) so we always get the
-      // live catalog regardless of whether it is served from dist/ or public/.
-      const res = await fetch('/api/catalog'); if (!res.ok) return
+      // Admins load the full catalog (including non-live apps) from the admin endpoint.
+      // Everyone else loads the public endpoint which only returns live apps.
+      const jwt = getJWT()
+      const url = isAdmin ? '/api/admin/catalog' : '/api/catalog'
+      const headers = isAdmin && jwt ? { Authorization: `Bearer ${jwt}` } : {}
+      const res = await fetch(url, { headers }); if (!res.ok) return
       const data = await res.json()
       set({ catalogApps: get().parseCatalogData(data) })
     } catch (_) {}

@@ -49,13 +49,17 @@ app.use('/api/fs/content', express.json({ limit: Infinity }))
 app.use(express.json({ limit: JSON_BODY_LIMIT }))
 
 // ── API routes ────────────────────────────────────────────────────────────────
-// Public (no-auth) catalog endpoint — always reads the live public catalog.
+// Public (no-auth) catalog endpoint — always reads the live catalog.
+// Only returns apps where is_live is not explicitly false.
 const _catalogPath = path.join(__dirname, '..', 'public', 'apps', 'catalog.json')
 app.get('/api/catalog', (_req, res) => {
   try {
     let raw = readFileSync(_catalogPath, 'utf8')
     if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1)
-    res.json(JSON.parse(raw))
+    const data = JSON.parse(raw)
+    // Filter out apps where is_live === false for the public endpoint
+    data.apps = (data.apps || []).filter(a => a.is_live !== false)
+    res.json(data)
   }
   catch (e) { console.error('[catalog]', e.message); res.status(500).json({ error: 'Catalog unavailable' }) }
 })
@@ -94,4 +98,16 @@ app.listen(PORT, () => {
   console.log(`  ${BRANDING.name} v${BRANDING.version}  →  http://localhost:${PORT}`)
   console.log(`  Database       →  PostgreSQL (${process.env.DATABASE_URL || 'postgresql://localhost/elyra_db'})`)
   console.log(`===========================================`)
+
+  // ── Process-level crash guards ──────────────────────────────────────────────
+  // Prevent unhandled rejections / exceptions from killing the server.
+  // These most commonly arise from large-file uploads where a Cloudflare tunnel
+  // drops the TCP connection mid-stream (ECONNRESET / EPIPE).
+  process.on('unhandledRejection', (reason) => {
+    console.error('[unhandledRejection]', reason)
+  })
+  process.on('uncaughtException', (err) => {
+    console.error('[uncaughtException]', err.message || err)
+    // Don't exit — keep the server alive for all other requests
+  })
 })

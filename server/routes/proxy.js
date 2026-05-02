@@ -101,13 +101,13 @@ const COMMON_HEADERS = {
  * @param {string|null} [body]
  * @param {string|null} [contentType]
  */
-async function proxyFetch(url, method = 'GET', body = null, contentType = null, _hops = 0) {
+async function proxyFetch(url, method = 'GET', body = null, contentType = null, _hops = 0, userAgent = null) {
   if (_hops > 10) throw new Error('Too many redirects')
 
   // Decode click-tracker URLs (bing.com/ck/a, google.com/url) to the real
   // destination so it's routed through CF Worker from the start.
   const realDest = decodeTrackerUrl(url)
-  if (realDest) return proxyFetch(realDest, method, body, contentType, _hops + 1)
+  if (realDest) return proxyFetch(realDest, method, body, contentType, _hops + 1, userAgent)
 
   if (CF_WORKER_URL && CF_WORKER_SECRET && !isDirectFetch(url)) {
     const res = await fetch(CF_WORKER_URL, {
@@ -128,7 +128,7 @@ async function proxyFetch(url, method = 'GET', body = null, contentType = null, 
   // non-search-engine site using the server's real IP.
   const opts = {
     method,
-    headers: { ...COMMON_HEADERS },
+    headers: { ...COMMON_HEADERS, ...(userAgent ? { 'User-Agent': userAgent } : {}) },
     redirect: 'manual',
     signal: AbortSignal.timeout(15_000),
   }
@@ -147,7 +147,7 @@ async function proxyFetch(url, method = 'GET', body = null, contentType = null, 
       // 307/308 preserve the original method; everything else becomes GET
       const nextMethod = (res.status === 307 || res.status === 308) ? method : 'GET'
       const nextBody   = nextMethod === 'GET' ? null : body
-      return proxyFetch(nextUrl, nextMethod, nextBody, contentType, _hops + 1)
+      return proxyFetch(nextUrl, nextMethod, nextBody, contentType, _hops + 1, userAgent)
     }
   }
 
@@ -187,7 +187,9 @@ const INTERCEPTOR = `<script data-nova-proxy>
     if(!a) return;
     var href = a.getAttribute('href');
     if(!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) return;
-    try { href = new URL(href, location.href).href; } catch(e){ return; }
+    // Use document.baseURI (respects injected <base> tag) — location.href is
+    // 'about:srcdoc' in srcdoc iframes and can't resolve relative URLs.
+    try { href = new URL(href, document.baseURI || location.href).href; } catch(e){ return; }
     if(a.hasAttribute('download')){
       var fname = a.getAttribute('download') || '';
       if(!fname){try{fname=new URL(href).pathname.split('/').pop()||'download';}catch(ex){fname='download';}}
@@ -212,7 +214,7 @@ const INTERCEPTOR = `<script data-nova-proxy>
     return function(state, title, url){
       fn.call(history, state, title, url);
       if(url) {
-        try { P.postMessage({type:'nova-loc',url:new URL(url,location.href).href},'*'); } catch(e){}
+        try { P.postMessage({type:'nova-loc',url:new URL(url, document.baseURI || location.href).href},'*'); } catch(e){}
       }
     };
   }
@@ -226,8 +228,8 @@ const INTERCEPTOR = `<script data-nova-proxy>
     var _assign  = location.assign.bind(location);
     var _replace = location.replace.bind(location);
     var _reload  = location.reload.bind(location);
-    location.assign  = function(u){ try{u=new URL(String(u),location.href).href;}catch(ex){} if(!nav(u)) _assign(u); };
-    location.replace = function(u){ try{u=new URL(String(u),location.href).href;}catch(ex){} if(!nav(u)) _replace(u); };
+    location.assign  = function(u){ try{u=new URL(String(u),document.baseURI||location.href).href;}catch(ex){} if(!nav(u)) _assign(u); };
+    location.replace = function(u){ try{u=new URL(String(u),document.baseURI||location.href).href;}catch(ex){} if(!nav(u)) _replace(u); };
     location.reload  = function(){ nav(location.href) || _reload(); };
   } catch(e){}
   // Report URL after full page load
@@ -303,7 +305,9 @@ router.get('/raw', async (req, res) => {
   }
 
   try {
-    const upstream = await proxyFetch(parsed.href)
+    // Forward the client UA so Bing returns the correct format for scroll XHRs
+    const clientUA = req.headers['user-agent'] || null
+    const upstream = await proxyFetch(parsed.href, 'GET', null, null, 0, clientUA)
 
     const contentType = upstream.headers.get('content-type') || 'application/octet-stream'
     const buf = Buffer.from(await upstream.arrayBuffer())
@@ -338,7 +342,11 @@ router.get('/', async (req, res) => {
   }
 
   try {
-    const upstream = await proxyFetch(parsed.href)
+    // Forward the client's real UA so sites serve the correct mobile/desktop
+    // variant — this prevents Bing from doing a runtime mobile redirect and
+    // makes responsive sites display correctly on mobile devices.
+    const clientUA = req.headers['x-client-ua'] || req.headers['user-agent'] || null
+    const upstream = await proxyFetch(parsed.href, 'GET', null, null, 0, clientUA)
 
     const finalUrl   = upstream._proxyFinalUrl || parsed.href
     const contentType = (upstream.headers.get('content-type') || 'text/html').toLowerCase()
@@ -355,6 +363,14 @@ router.get('/', async (req, res) => {
       if (!/<base\b/i.test(html)) {
         html = html.replace(/(<head\b[^>]*>)/i, `$1\n<base href="${baseHref}">`)
         if (!html.includes('<base')) html = `<base href="${baseHref}">\n` + html
+      }
+
+      // Ensure mobile-responsive layout — inject viewport meta if the page
+      // doesn't have one (fixes desktop-only display on mobile devices)
+      if (!/<meta[^>]+name=["']?viewport["']?/i.test(html)) {
+        const vp = '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        const injected = html.replace(/(<head\b[^>]*>)/i, `$1\n${vp}`)
+        html = injected !== html ? injected : (vp + '\n' + html)
       }
 
       // Inject interceptor before </head>, or prepend
@@ -421,7 +437,8 @@ router.post('/', async (req, res) => {
   const contentType = req.headers['content-type'] || 'application/x-www-form-urlencoded'
 
   try {
-    const upstream = await proxyFetch(parsed.href, 'POST', rawBody, contentType)
+    const clientUA = req.headers['x-client-ua'] || req.headers['user-agent'] || null
+    const upstream = await proxyFetch(parsed.href, 'POST', rawBody, contentType, 0, clientUA)
     const finalUrl = upstream._proxyFinalUrl || parsed.href
     const upCt     = (upstream.headers.get('content-type') || 'text/html').toLowerCase()
 

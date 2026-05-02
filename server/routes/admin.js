@@ -19,7 +19,6 @@ function requireAdmin(req, res, next) {
   next()
 }
 router.use(requireAdmin)
-router.use(qpMiddleware)
 
 function toPublic(u) {
   return {
@@ -208,7 +207,7 @@ function readCatalog() {
 }
 
 function sanitizeApp(body) {
-  const { name, description, url, allowIframe, showCursor, featured, tags, icon_url, cover_image, media } = body
+  const { name, description, url, allowIframe, showCursor, featured, tags, icon_url, cover_image, media, is_live } = body
   return {
     name:        String(name        || '').trim(),
     description: String(description || ''),
@@ -216,6 +215,7 @@ function sanitizeApp(body) {
     allowIframe: Boolean(allowIframe),
     showCursor:  showCursor === false ? false : true,
     featured:    Boolean(featured),
+    is_live:     is_live === false ? false : true,
     tags:        Array.isArray(tags)  ? tags.map(String)  : [],
     icon_url:    String(icon_url     || '').trim(),
     cover_image: String(cover_image  || '').trim(),
@@ -228,9 +228,13 @@ function writeCatalog(data) {
   pushToAll('catalog-update', data)
 }
 
+// GET catalog: read-only — no qp required
 router.get('/catalog', (_req, res) => {
   res.json(readCatalog())
 })
+
+// Mutations below require qp anti-replay
+router.use(qpMiddleware)
 
 router.post('/catalog/apps', (req, res) => {
   try {
