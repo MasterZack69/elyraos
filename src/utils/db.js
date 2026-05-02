@@ -307,10 +307,10 @@ export function fsRawUrl(nodeId, name) {
  * Sends raw bytes directly — server writes them to disk without buffering.
  * Supports upload progress events and cancellation via AbortSignal.
  */
-// 80 MB per chunk — 20 MB headroom under Cloudflare Tunnels' 100 MB hard limit.
-// (95 MB was too close; CF enforcement is slightly below the stated limit and
-//  HTTP headers/framing can push a 95 MB body over the edge.)
-const CHUNK_SIZE = 80 * 1024 * 1024
+// 50 MB per chunk — requires nginx client_max_body_size ≥ 55m.
+// Stays well under Cloudflare's 100 MB hard request body limit.
+// A 1 GB file = 20 chunks; a 5 GB file = 100 chunks.
+const CHUNK_SIZE = 50 * 1024 * 1024
 
 // ── Upload semaphore ──────────────────────────────────────────────────────────
 // Limits concurrent XHR requests to 1 — files are uploaded one at a time.
@@ -370,8 +370,11 @@ function _fsChunk(nodeId, blob, seq, total, fileSize, onProgress, signal) {
       if (xhr.status < 400) {
         try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({ ok: true }) }
       } else {
-        try { reject(new Error(JSON.parse(xhr.responseText)?.error || 'Upload failed')) }
-        catch { reject(new Error('Upload failed')) }
+        const msg = (() => { try { return JSON.parse(xhr.responseText)?.error } catch {} })() || 'Upload failed'
+        const err = new Error(xhr.status === 413 ? 'File too large for the server. Contact your administrator.' : msg)
+        // Never retry 413 — the server will reject it every time regardless of retries
+        if (xhr.status === 413) err.noRetry = true
+        reject(err)
       }
     }
     xhr.onerror = () => { release(); reject(new Error('Upload failed')) }
@@ -387,7 +390,7 @@ function _fsChunk(nodeId, blob, seq, total, fileSize, onProgress, signal) {
     xhr.setRequestHeader('X-File-Size', String(fileSize))
     xhr.send(blob)
   })).catch(err => {
-    if (err.cancelled || attemptsLeft <= 1) throw err
+    if (err.cancelled || err.noRetry || attemptsLeft <= 1) throw err
     // Network error — wait then retry
     return new Promise(r => setTimeout(r, delay))
       .then(() => attempt(attemptsLeft - 1, delay * 2))
